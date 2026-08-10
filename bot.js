@@ -1,8 +1,8 @@
-const { TelegramBot } = require('node-telegram-bot-api');
+const TelegramBot = require('node-telegram-bot-api').default;
 const mysql = require('mysql2');
 
 // --- Настройки бота ---
-const token = '8948464887:AAExEPdQqzaarh9eJZ3zKS2S7JZx4J0yHEw'; 
+const token = '8948464887:AAExEPdQqzaarh9eJZ3zKS2S7JZx4J0yHEw';
 const bot = new TelegramBot(token, { polling: true });
 
 // --- Подключение к MySQL ---
@@ -37,7 +37,9 @@ bot.onText(/\/help/, (msg) => {
 /creator - информация о создателе
 /randomItem - получить случайный предмет из БД
 /getItemByID <id> - получить предмет по ID
-/deleteItem <id> - удалить предмет по ID`;
+/deleteItem <id> - удалить предмет по ID
+!qr <текст/ссылка> - создать QR-код
+!webscr <url> - скриншот сайта`;
     bot.sendMessage(chatId, helpText);
 });
 
@@ -63,7 +65,7 @@ bot.onText(/\/randomItem/, (msg) => {
             return;
         }
         if (results.length === 0) {
-            bot.sendMessage(chatId, ' В базе данных нет предметов');
+            bot.sendMessage(chatId, '📭 В базе данных нет предметов');
             return;
         }
         const item = results[0];
@@ -71,7 +73,7 @@ bot.onText(/\/randomItem/, (msg) => {
     });
 });
 
-// --- Команда /getItemByID <id> --- // Команды с параметрами вводятся через пробел: /getItemByID 1, /deleteItem 2
+// --- Команда /getItemByID <id> ---
 bot.onText(/\/getItemByID (.+)/, (msg, match) => {
     const chatId = msg.chat.id;
     const id = parseInt(match[1]);
@@ -102,7 +104,6 @@ bot.onText(/\/deleteItem (.+)/, (msg, match) => {
         bot.sendMessage(chatId, '❌ Некорректный ID. Введите число.');
         return;
     }
-    // Сначала проверяем, существует ли запись
     connection.query('SELECT * FROM Items WHERE id = ?', [id], (err, rows) => {
         if (err) {
             console.error(err);
@@ -113,7 +114,6 @@ bot.onText(/\/deleteItem (.+)/, (msg, match) => {
             bot.sendMessage(chatId, `❌ Предмет с ID ${id} не найден. Удаление невозможно.`);
             return;
         }
-        // Удаляем
         connection.query('DELETE FROM Items WHERE id = ?', [id], (err2) => {
             if (err2) {
                 console.error(err2);
@@ -123,6 +123,72 @@ bot.onText(/\/deleteItem (.+)/, (msg, match) => {
             bot.sendMessage(chatId, `✅ Предмет с ID ${id} успешно удалён`);
         });
     });
+});
+
+// --- Команда !qr <текст/ссылка> ---
+bot.onText(/!qr (.+)/, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const text = match[1];
+    if (!text) {
+        bot.sendMessage(chatId, '❌ Укажите текст или ссылку для QR-кода.\nПример: !qr https://octagon.ru');
+        return;
+    }
+    try {
+        const encoded = encodeURIComponent(text);
+        const url = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encoded}`;
+        await bot.sendPhoto(chatId, url, { caption: `QR-код для: ${text}` });
+    } catch (error) {
+        console.error(error);
+        bot.sendMessage(chatId, '❌ Ошибка при генерации QR-кода');
+    }
+});
+
+// --- Команда !webscr <url> ---
+bot.onText(/!webscr (.+)/, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const url = match[1].trim();
+    if (!url) {
+        bot.sendMessage(chatId, '❌ Укажите адрес сайта.\nПример: !webscr https://octagon.ru');
+        return;
+    }
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        bot.sendMessage(chatId, '❌ URL должен начинаться с http:// или https://');
+        return;
+    }
+
+    const waitMsg = await bot.sendMessage(chatId, '⏳ Создаю скриншот сайта, подождите...');
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 20000);
+
+    try {
+        // Используем стабильный сервис скриншотов Microlink
+        const screenshotApiUrl = `https://api.microlink.io/?url=${encodeURIComponent(url)}&screenshot=true&meta=false&embed=screenshot.url`;
+        
+        const response = await fetch(screenshotApiUrl, { signal: controller.signal });
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+            throw new Error('Сервис скриншотов не ответил');
+        }
+
+        const arrayBuffer = await response.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+
+        await bot.sendPhoto(chatId, buffer, { caption: `Скриншот сайта: ${url}` });
+        await bot.deleteMessage(chatId, waitMsg.message_id).catch(() => {});
+    } catch (error) {
+        clearTimeout(timeoutId);
+        console.error(error);
+        
+        await bot.deleteMessage(chatId, waitMsg.message_id).catch(() => {});
+        
+        if (error.name === 'AbortError') {
+            bot.sendMessage(chatId, '⏱️ Превышено время ожидания. Сервис скриншотов не отвечает.');
+        } else {
+            bot.sendMessage(chatId, '❌ Не удалось создать скриншот. Возможно, сайт заблокирован или недоступен.');
+        }
+    }
 });
 
 console.log(' Бот запущен!');
