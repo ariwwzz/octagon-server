@@ -1,5 +1,6 @@
-const TelegramBot = require('node-telegram-bot-api').default;
+const { TelegramBot } = require('node-telegram-bot-api');
 const mysql = require('mysql2');
+const cron = require('node-cron');
 
 // --- Настройки бота ---
 const token = '8948464887:AAExEPdQqzaarh9eJZ3zKS2S7JZx4J0yHEw';
@@ -8,7 +9,7 @@ const bot = new TelegramBot(token, { polling: true });
 // --- Подключение к MySQL ---
 const connection = mysql.createConnection({
     host: 'localhost',
-    user: 'appuser',        
+    user: 'appuser',
     password: '12345',
     database: 'ChatBotTests'
 });
@@ -21,6 +22,24 @@ connection.connect((err) => {
     console.log('✅ Подключено к MySQL');
 });
 
+// --- Функция обновления/добавления времени последнего сообщения ---
+function updateUserLastMessage(userId) {
+    const now = new Date();
+    const formatted = now.toISOString().slice(0, 19).replace('T', ' ');
+    const query = 'INSERT INTO Users (id, lastMessage) VALUES (?, ?) ON DUPLICATE KEY UPDATE lastMessage = ?';
+    connection.query(query, [userId, formatted, formatted], (err) => {
+        if (err) console.error('❌ Ошибка обновления lastMessage:', err);
+    });
+}
+
+// --- Обработчик всех сообщений (логирование) ---
+bot.on('message', (msg) => {
+    if (msg.chat.type === 'private') {
+        const userId = msg.from.id;
+        updateUserLastMessage(userId);
+    }
+});
+
 // --- Команда /start ---
 bot.onText(/\/start/, (msg) => {
     const chatId = msg.chat.id;
@@ -31,7 +50,7 @@ bot.onText(/\/start/, (msg) => {
 bot.onText(/\/help/, (msg) => {
     const chatId = msg.chat.id;
     const helpText = 
-` Доступные команды:
+`📋 Доступные команды:
 /help - показать список команд
 /site - ссылка на сайт Октагона
 /creator - информация о создателе
@@ -46,13 +65,13 @@ bot.onText(/\/help/, (msg) => {
 // --- Команда /site ---
 bot.onText(/\/site/, (msg) => {
     const chatId = msg.chat.id;
-    bot.sendMessage(chatId, ' Сайт Октагона: https://octagon.ru');
+    bot.sendMessage(chatId, '🌐 Сайт Октагона: https://octagon.ru');
 });
 
 // --- Команда /creator ---
 bot.onText(/\/creator/, (msg) => {
     const chatId = msg.chat.id;
-    bot.sendMessage(chatId, '👤 Автор бота: Шидэ Арина'); 
+    bot.sendMessage(chatId, '👤 Автор бота: Иванова Анна');
 });
 
 // --- Команда /randomItem ---
@@ -146,7 +165,7 @@ bot.onText(/!qr (.+)/, async (msg, match) => {
 // --- Команда !webscr <url> ---
 bot.onText(/!webscr (.+)/, async (msg, match) => {
     const chatId = msg.chat.id;
-    const url = match[1].trim();
+    const url = match[1];
     if (!url) {
         bot.sendMessage(chatId, '❌ Укажите адрес сайта.\nПример: !webscr https://octagon.ru');
         return;
@@ -155,40 +174,43 @@ bot.onText(/!webscr (.+)/, async (msg, match) => {
         bot.sendMessage(chatId, '❌ URL должен начинаться с http:// или https://');
         return;
     }
-
-    const waitMsg = await bot.sendMessage(chatId, '⏳ Создаю скриншот сайта, подождите...');
-
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 20000);
-
     try {
-        // Используем стабильный сервис скриншотов Microlink
-        const screenshotApiUrl = `https://api.microlink.io/?url=${encodeURIComponent(url)}&screenshot=true&meta=false&embed=screenshot.url`;
-        
-        const response = await fetch(screenshotApiUrl, { signal: controller.signal });
-        clearTimeout(timeoutId);
-
-        if (!response.ok) {
-            throw new Error('Сервис скриншотов не ответил');
-        }
-
-        const arrayBuffer = await response.arrayBuffer();
-        const buffer = Buffer.from(arrayBuffer);
-
-        await bot.sendPhoto(chatId, buffer, { caption: `Скриншот сайта: ${url}` });
-        await bot.deleteMessage(chatId, waitMsg.message_id).catch(() => {});
+        const encoded = encodeURIComponent(url);
+        const screenshotUrl = `https://mini.s-shot.ru/1024x0/PNG/?${encoded}`;
+        await bot.sendPhoto(chatId, screenshotUrl, { caption: `Скриншот сайта: ${url}` });
     } catch (error) {
-        clearTimeout(timeoutId);
         console.error(error);
-        
-        await bot.deleteMessage(chatId, waitMsg.message_id).catch(() => {});
-        
-        if (error.name === 'AbortError') {
-            bot.sendMessage(chatId, '⏱️ Превышено время ожидания. Сервис скриншотов не отвечает.');
-        } else {
-            bot.sendMessage(chatId, '❌ Не удалось создать скриншот. Возможно, сайт заблокирован или недоступен.');
-        }
+        bot.sendMessage(chatId, '❌ Ошибка при создании скриншота');
     }
+});
+
+// --- Ежедневная рассылка случайных предметов неактивным пользователям ---
+// Запускаем задачу каждый день в 10:00 UTC (13:00 МСК)
+cron.schedule('0 10 * * *', () => {
+    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+    const formatted = twoDaysAgo.toISOString().slice(0, 19).replace('T', ' ');
+    
+    connection.query(
+        'SELECT id FROM Users WHERE lastMessage < ?',
+        [formatted],
+        (err, rows) => {
+            if (err) {
+                console.error('❌ Ошибка получения неактивных пользователей:', err);
+                return;
+            }
+            console.log(`🔔 Найдено неактивных пользователей: ${rows.length}`);
+            rows.forEach((row) => {
+                const userId = row.id;
+                // Отправляем случайный предмет
+                connection.query('SELECT * FROM Items ORDER BY RAND() LIMIT 1', (err2, results) => {
+                    if (err2 || results.length === 0) return;
+                    const item = results[0];
+                    const message = `🎲 Случайный предмет для тебя (ты не писал больше 2 суток):\n${item.id} - ${item.name}: ${item.desc}`;
+                    bot.sendMessage(userId, message).catch(() => {});
+                });
+            });
+        }
+    );
 });
 
 console.log(' Бот запущен!');
